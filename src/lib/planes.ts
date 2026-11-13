@@ -9,10 +9,17 @@ export type Plan = {
   id: string; creadora: string; titulo: string; descripcion: string | null; lugar: string | null;
   inicio: string; fin: string | null; fecha_limite: string; estado: EstadoPlan; created_at: string;
 };
-export type Respuesta = { plan_id: string; usuaria_id: string; estado: 'acepta' | 'rechaza' };
+export type Respuesta = {
+  plan_id: string; usuaria_id: string; estado: 'acepta' | 'rechaza';
+  motivo?: string | null;   // v2: por qué no puede (opcional)
+  llegada?: string | null;  // v2: a qué hora llega (null = a la hora del plan)
+};
 export type Franja = 'mañana' | 'tarde' | 'noche';
 
 const TZ = 'Europe/Madrid';
+
+// Primera letra en mayúscula (sin poner en mayúscula cada palabra)
+export const cap = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
 
 export const fmtFechaLarga = (iso: string) =>
   new Date(iso).toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', timeZone: TZ });
@@ -59,13 +66,52 @@ export function useMiId() {
 }
 
 export async function responder(planId: string, miId: string, estado: 'acepta' | 'rechaza') {
-  const { error } = await supabase.from('respuestas').upsert(
-    { plan_id: planId, usuaria_id: miId, estado, updated_at: new Date().toISOString() },
-    { onConflict: 'plan_id,usuaria_id' }
-  );
+  const fila: Record<string, unknown> = { plan_id: planId, usuaria_id: miId, estado, updated_at: new Date().toISOString() };
+  if (estado === 'acepta') fila.motivo = null; // si vuelve a ir, se borra el motivo de no poder
+  const { error } = await supabase.from('respuestas').upsert(fila, { onConflict: 'plan_id,usuaria_id' });
   if (error) {
     throw new Error(estado === 'rechaza'
       ? 'Ya ha pasado la fecha límite: para borrarte, pide anulación desde el plan.'
       : 'No se ha podido guardar tu respuesta.');
   }
 }
+
+// v2: motivo opcional al decir que no
+export async function guardarMotivo(planId: string, miId: string, motivo: string) {
+  const { error } = await supabase.from('respuestas')
+    .update({ motivo: motivo.trim() || null })
+    .eq('plan_id', planId).eq('usuaria_id', miId);
+  if (error) throw new Error('No se ha podido guardar el motivo.');
+}
+
+// v2: hora de llegada (null = a la hora del plan)
+export async function guardarLlegada(planId: string, miId: string, llegada: string | null) {
+  const { error } = await supabase.from('respuestas')
+    .update({ llegada })
+    .eq('plan_id', planId).eq('usuaria_id', miId);
+  if (error) throw new Error('No se ha podido guardar tu hora de llegada.');
+}
+
+// Fin del plan; si no tiene, se suponen 2 horas
+export const finPlan = (p: Pick<Plan, 'inicio' | 'fin'>) =>
+  p.fin ?? new Date(new Date(p.inicio).getTime() + 2 * 3_600_000).toISOString();
+
+// v2: ocupaciones (viajes, clases…) de todas en un intervalo. Si es privada, titulo = null.
+export type Ocupada = {
+  ocupacion_id: string; usuaria_id: string; titulo: string | null; privada: boolean;
+  todo_el_dia: boolean; inicio: string; fin: string;
+};
+
+export async function ocupacionesEn(desde: string | Date, hasta: string | Date): Promise<Ocupada[]> {
+  const { data, error } = await supabase.rpc('ocupaciones_en', {
+    desde: new Date(desde).toISOString(),
+    hasta: new Date(hasta).toISOString(),
+  });
+  if (error) return [];
+  return (data ?? []) as Ocupada[];
+}
+
+export const solapa = (o: { inicio: string; fin: string }, desde: string, hasta: string) =>
+  new Date(o.inicio) < new Date(hasta) && new Date(o.fin) > new Date(desde);
+
+export const textoOcupada = (o: Ocupada) => (o.titulo ? o.titulo : 'ocupada');

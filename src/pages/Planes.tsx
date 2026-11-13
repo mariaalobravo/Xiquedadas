@@ -1,9 +1,10 @@
 // src/pages/Planes.tsx — ruta / (pantalla principal)
 // Tres apartados: Por responder (propuestas), Próximos (quién va a cada plan) y Pasados (marcar asistencia).
+// v2: cada tarjeta enseña quién no puede por sus ocupaciones (viajes, clases…).
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
-import { useMiId, type Plan, type Respuesta } from '../lib/planes';
+import { finPlan, ocupacionesEn, solapa, useMiId, type Ocupada, type Plan, type Respuesta } from '../lib/planes';
 import { C, btnPrimario, pagina } from '../lib/ui';
 import TarjetaPlan from '../components/TarjetaPlan';
 
@@ -16,6 +17,7 @@ export default function Planes() {
   const [planes, setPlanes] = useState<Plan[]>([]);
   const [respuestas, setRespuestas] = useState<Respuesta[]>([]);
   const [asistencia, setAsistencia] = useState<{ plan_id: string; usuaria_id: string }[]>([]);
+  const [ocupaciones, setOcupaciones] = useState<Ocupada[]>([]);
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -27,12 +29,18 @@ export default function Planes() {
     const ids = (p ?? []).map((x) => x.id);
     const [r, a] = ids.length
       ? await Promise.all([
-          supabase.from('respuestas').select('plan_id, usuaria_id, estado').in('plan_id', ids),
+          supabase.from('respuestas').select('plan_id, usuaria_id, estado, motivo, llegada').in('plan_id', ids),
           supabase.from('asistencia').select('plan_id, usuaria_id').in('plan_id', ids),
         ])
       : [{ data: [] }, { data: [] }];
-    setPlanes((p ?? []) as Plan[]);
+    const lista = (p ?? []) as Plan[];
+    setPlanes(lista);
     setRespuestas((r.data ?? []) as Respuesta[]);
+    // Ocupaciones de todas en el rango de los planes que se ven
+    if (lista.length) {
+      const hasta = new Date(Math.max(...lista.map((x) => new Date(finPlan(x)).getTime())));
+      setOcupaciones(await ocupacionesEn(lista[0].inicio, hasta));
+    }
     setAsistencia((a.data ?? []) as { plan_id: string; usuaria_id: string }[]);
     setCargando(false);
   }, []);
@@ -99,6 +107,7 @@ export default function Planes() {
 
       {lista.map((p) => (
         <TarjetaPlan key={p.id} plan={p} respuestas={respDe(p.id)} miId={miId} onCambio={cargar}
+          ocupadas={ocupaciones.filter((o) => solapa(o, p.inicio, finPlan(p)))}
           aviso={apartado === 'pasados' && faltaAsistencia(p) ? 'Falta marcar quién fue: entra en el plan.' : undefined} />
       ))}
 

@@ -31,7 +31,7 @@ export function FilaAvatares({ ids, tam = 36, texto = 'pueden' }: { ids: string[
 
   const nombres = lista.map((p) => p.nombre);
   const frase = nombres.length === 1
-    ? `${nombres[0]} ${({ pueden: 'puede', van: 'va' } as Record<string, string>)[texto] ?? texto}`
+    ? `${nombres[0]} ${({ pueden: 'puede', van: 'va', estuvieron: 'estuvo' } as Record<string, string>)[texto] ?? texto}`
     : `${nombres.slice(0, -1).join(', ')} y ${nombres.at(-1)} ${texto}`;
 
   return (

@@ -1,13 +1,18 @@
 // src/pages/DetallePlan.tsx — ruta /plan/:id
 // Toda la información de un plan: quién va, responder, pedir anulación (borrarme / cancelar),
 // aprobarla si eres la creadora y, cuando ya ha empezado, marcar quién fue.
+// v2: motivo al decir que no, ocupaciones de cada una, hora de llegada y fotos.
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { usePerfiles } from '../lib/perfiles';
-import { Avatar, FilaAvatares } from '../components/Avatar';
+import { Avatar } from '../components/Avatar';
+import MotivoNoPuedo from '../components/MotivoNoPuedo';
+import FotosQuedada from '../components/FotosQuedada';
+import { HorarioLlegada, MiLlegada } from '../components/HorarioLlegada';
 import {
-  ESTADO_PLAN, cuentaAtras, fmtCorto, fmtFechaLarga, fmtHora, responder, useMiId, type Plan, type Respuesta,
+  ESTADO_PLAN, cap, cuentaAtras, finPlan, fmtCorto, fmtFechaLarga, fmtHora, ocupacionesEn, responder, textoOcupada, useMiId,
+  type Ocupada, type Plan, type Respuesta,
 } from '../lib/planes';
 import { C, btnPrimario, btnSecundario, campo, chip, pagina, tarjeta } from '../lib/ui';
 
@@ -38,12 +43,14 @@ export default function DetallePlan() {
   const [motivo, setMotivo] = useState('');
   const [ocupado, setOcupado] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [ocupaciones, setOcupaciones] = useState<Ocupada[]>([]);
+  const [pidiendoMotivo, setPidiendoMotivo] = useState(false);
 
   const cargar = useCallback(async () => {
     if (!id) return;
     const [p, r, a, s, d] = await Promise.all([
       supabase.from('planes').select('*').eq('id', id).maybeSingle(),
-      supabase.from('respuestas').select('plan_id, usuaria_id, estado').eq('plan_id', id),
+      supabase.from('respuestas').select('plan_id, usuaria_id, estado, motivo, llegada').eq('plan_id', id),
       supabase.from('anulaciones').select('*').eq('plan_id', id).order('created_at', { ascending: false }),
       supabase.from('asistencia').select('usuaria_id, estado').eq('plan_id', id),
       supabase.from('deudas').select('deudora, acreedora, cervezas, saldada_en').eq('plan_id', id),
@@ -53,6 +60,7 @@ export default function DetallePlan() {
     setAnulaciones((a.data ?? []) as Anulacion[]);
     setAsistencia(Object.fromEntries((s.data ?? []).map((x) => [x.usuaria_id, x.estado])));
     setDeudas((d.data ?? []) as Deuda[]);
+    if (p.data) setOcupaciones(await ocupacionesEn(p.data.inicio, finPlan(p.data)));
   }, [id]);
 
   useEffect(() => { cargar(); }, [cargar]);
@@ -77,10 +85,13 @@ export default function DetallePlan() {
   const abierto = plan.estado === 'propuesto' && new Date(plan.fecha_limite) > ahora;
   const vivo = !empezado && (plan.estado === 'propuesto' || plan.estado === 'confirmado');
 
-  const aceptan = respuestas.filter((r) => r.estado === 'acepta').map((r) => r.usuaria_id);
-  const rechazan = respuestas.filter((r) => r.estado === 'rechaza').map((r) => r.usuaria_id);
+  const aceptanR = respuestas.filter((r) => r.estado === 'acepta');
+  const aceptan = aceptanR.map((r) => r.usuaria_id);
+  const rechazanR = respuestas.filter((r) => r.estado === 'rechaza');
   const sinResponder = perfiles.map((p) => p.id).filter((pid) => !respuestas.some((r) => r.usuaria_id === pid));
-  const mia = respuestas.find((r) => r.usuaria_id === miId)?.estado;
+  const miaR = respuestas.find((r) => r.usuaria_id === miId);
+  const mia = miaR?.estado;
+  const ocupacionDe = (uid: string) => ocupaciones.find((o) => o.usuaria_id === uid);
   const voy = mia === 'acepta';
   const pendientes = anulaciones.filter((a) => a.estado === 'pendiente');
   const tengoPendiente = (tipo: Anulacion['tipo']) => pendientes.some((a) => a.solicitante === miId && a.tipo === tipo);
@@ -94,7 +105,10 @@ export default function DetallePlan() {
     finally { setOcupado(false); }
   }
 
-  const contestar = (estado: 'acepta' | 'rechaza') => hacer(() => responder(plan.id, miId!, estado));
+  const contestar = (estado: 'acepta' | 'rechaza') => hacer(async () => {
+    await responder(plan.id, miId!, estado);
+    setPidiendoMotivo(estado === 'rechaza');
+  });
 
   const pedirAnulacion = () => hacer(async () => {
     if (!formulario) return;
@@ -133,7 +147,7 @@ export default function DetallePlan() {
           Propuesto por {soyCreadora ? 'ti' : nombre(plan.creadora)}
         </div>
         <div style={{ fontSize: 16 }}>
-          <div style={{ textTransform: 'capitalize' }}>🗓️ {fmtFechaLarga(plan.inicio)}</div>
+          <div>🗓️ {cap(fmtFechaLarga(plan.inicio))}</div>
           <div>🕒 {fmtHora(plan.inicio)}{plan.fin && ` – ${fmtHora(plan.fin)}`}</div>
           {plan.lugar && <div>📍 {plan.lugar}</div>}
         </div>
@@ -166,16 +180,50 @@ export default function DetallePlan() {
           ) : (
             <button disabled={ocupado} onClick={() => contestar('acepta')} style={{ ...btnPrimario, alignSelf: 'flex-start' }}>Me apunto</button>
           )}
+
+          {/* v2: motivo opcional al decir que no */}
+          {pidiendoMotivo ? (
+            <MotivoNoPuedo planId={plan.id} miId={miId} inicial={miaR?.motivo ?? ocupacionDe(miId)?.titulo}
+                           onHecho={() => { setPidiendoMotivo(false); cargar(); }} />
+          ) : mia === 'rechaza' && (
+            <span style={{ fontSize: 14, color: C.suave }}>
+              {miaR?.motivo ? `Tu motivo: ${miaR.motivo} · ` : ''}
+              <button onClick={() => setPidiendoMotivo(true)} style={{ background: 'none', border: 'none', padding: 0, color: C.morado, font: 'inherit', cursor: 'pointer', textDecoration: 'underline' }}>
+                {miaR?.motivo ? 'cambiar' : 'Añadir por qué no puedes'}
+              </button>
+            </span>
+          )}
+
+          {/* v2: hora de llegada */}
+          {voy && <MiLlegada plan={plan} miId={miId} llegada={miaR?.llegada} onCambio={cargar} />}
         </section>
       )}
 
       {/* Quién va */}
       <section style={tarjeta}>
-        <strong>Quién va</strong>
-        <FilaAvatares ids={aceptan} tam={34} texto="van" />
-        {rechazan.length > 0 && <span style={{ fontSize: 14, color: C.suave }}>No pueden: {rechazan.map(nombre).join(', ')}</span>}
+        <strong>Quién va y a qué hora</strong>
+        <HorarioLlegada plan={plan} aceptan={aceptanR} />
+        {aceptan.filter((uid) => ocupacionDe(uid)).map((uid) => (
+          <span key={uid} style={{ fontSize: 13, color: C.aviso }}>⚠️ {nombre(uid)} tiene «{textoOcupada(ocupacionDe(uid)!)}» a esa hora</span>
+        ))}
+        {rechazanR.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 14, color: C.suave, paddingTop: 6, borderTop: `1px solid ${C.borde}` }}>
+            <span style={{ fontWeight: 600 }}>No pueden</span>
+            {rechazanR.map((r) => {
+              const texto = r.motivo || (ocupacionDe(r.usuaria_id) ? textoOcupada(ocupacionDe(r.usuaria_id)!) : '');
+              return <span key={r.usuaria_id}>🚫 {nombre(r.usuaria_id)}{texto && `: ${texto}`}</span>;
+            })}
+          </div>
+        )}
         {plan.estado === 'propuesto' && sinResponder.length > 0 && (
-          <span style={{ fontSize: 14, color: C.suave }}>Sin responder: {sinResponder.map(nombre).join(', ')}</span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 14, color: C.suave, paddingTop: 6, borderTop: `1px solid ${C.borde}` }}>
+            <span style={{ fontWeight: 600 }}>Sin responder</span>
+            {sinResponder.map((uid) => (
+              <span key={uid}>
+                {nombre(uid)}{ocupacionDe(uid) && ` · 🧳 ${textoOcupada(ocupacionDe(uid)!)}`}
+              </span>
+            ))}
+          </div>
         )}
       </section>
 
@@ -277,6 +325,9 @@ export default function DetallePlan() {
           )}
         </section>
       )}
+
+      {/* v2: fotos de la quedada (cuando ya ha empezado) */}
+      {empezado && plan.estado !== 'anulado' && <FotosQuedada planId={plan.id} puedeSubir={voy} />}
 
       {error && <p style={{ margin: 0, color: C.error }}>{error}</p>}
     </main>

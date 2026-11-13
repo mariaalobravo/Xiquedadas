@@ -1,11 +1,11 @@
-// supabase/functions/encuestas/index.ts
+// supabase/functions/encuestas/index.ts  (v2)
 // La llama pg_cron cada hora. Calcula la hora de Madrid y decide qué toca:
-//  domingo 10:00 → abrir encuesta de la semana siguiente y avisar a todas
+//  domingo 10:00 → abrir la encuesta de la semana siguiente y avisar a todas
 //  domingo 14:00 → 1.er recordatorio a quien no ha respondido
 //  domingo 23:00 → 2.º recordatorio
-//  lunes   14:00 → 3.er recordatorio
-//  lunes   17:00 → cerrar
-// Al cerrar, actualiza las rachas de respuesta (contestar la encuesta también suma).
+//  lunes (primera ejecución) → racha: cuenta quien contestó antes de que acabara el domingo
+//  cada día → los días que ya han pasado quedan cerrados (lo hace la base de datos);
+//             la encuesta entera se cierra cuando acaba su domingo
 // Desplegar:  npx supabase functions deploy encuestas --no-verify-jwt --use-api
 import { autorizada, notificar, sb } from '../_shared/push.ts';
 import { cerrarEventoRacha } from '../_shared/rachas.ts';
@@ -40,17 +40,36 @@ Deno.serve(async (req) => {
 
   const { dia, hora, fecha } = ahoraMadrid();
 
-  // Domingo: la encuesta es para la semana que empieza mañana.
-  // Lunes: es la de la semana en curso (empieza hoy).
-  const lunes = dia === 'Sun' ? sumarDias(fecha, 1) : dia === 'Mon' ? fecha : null;
-  if (!lunes) return new Response('nada que hacer');
+  // 1) Cerrar las encuestas cuya semana ya ha terminado (su domingo es anterior a hoy)
+  await sb.from('encuestas').update({ estado: 'cerrada' })
+    .eq('estado', 'abierta').lt('semana_inicio', sumarDias(fecha, -6));
 
-  // 1) Domingo ≥ 10:00 → crear encuesta y avisar
-  if (dia === 'Sun' && hora >= 10) {
+  // 2) Lunes: racha de la encuesta que empieza hoy (contestada antes de que acabara el domingo)
+  if (dia === 'Mon') {
+    const { data: marcada } = await sb.from('encuestas').update({ racha_procesada: true })
+      .eq('semana_inicio', fecha).eq('racha_procesada', false).select('id');
+    if (marcada?.length) {
+      const corte = new Date();               // la primera ejecución del lunes, ~00:00
+      const { data: resp } = await sb.from('respuestas_encuesta')
+        .select('usuaria_id, creada_en').eq('encuesta_id', marcada[0].id);
+      const aTiempo = (resp ?? [])
+        .filter((r) => new Date(r.creada_en) <= corte)
+        .map((r) => r.usuaria_id);
+      await cerrarEventoRacha(aTiempo, 'la encuesta semanal');
+    }
+    return new Response('ok');
+  }
+
+  if (dia !== 'Sun') return new Response('nada que hacer');
+
+  // 3) Domingo: encuesta de la semana que empieza mañana
+  const lunes = sumarDias(fecha, 1);
+
+  if (hora >= 10) {
     const { data: creada } = await sb.from('encuestas')
       .upsert({ semana_inicio: lunes }, { onConflict: 'semana_inicio', ignoreDuplicates: true })
       .select().maybeSingle();
-    if (creada) // solo si se acaba de crear
+    if (creada)
       await notificar({ title: 'Encuesta semanal 📅', body: '¿Qué días puedes salir esta semana?', url: '/encuesta' });
   }
 
@@ -58,27 +77,13 @@ Deno.serve(async (req) => {
     .select('*').eq('semana_inicio', lunes).eq('estado', 'abierta').maybeSingle();
   if (!enc) return new Response('sin encuesta abierta');
 
-  // 2) Lunes ≥ 17:00 → cerrar (va antes que los recordatorios para no avisar justo al cerrar)
-  if (dia === 'Mon' && hora >= 17) {
-    const { data: cerrada } = await sb.from('encuestas').update({ estado: 'cerrada' })
-      .eq('id', enc.id).eq('estado', 'abierta').select('id');
-    if (cerrada?.length) {
-      const { data: resp } = await sb.from('respuestas_encuesta').select('usuaria_id').eq('encuesta_id', enc.id);
-      await cerrarEventoRacha((resp ?? []).map((r) => r.usuaria_id), 'la encuesta semanal');
-      await notificar({ title: 'Encuesta cerrada', body: 'Mira qué días cuadran a más gente', url: '/encuesta' });
-    }
-    return new Response('ok');
-  }
-
-  // 3) Recordatorios, solo a quien no ha respondido.
-  //    Si alguno se saltó (por ejemplo, una ejecución fallida), se envía solo el más reciente.
+  // 4) Recordatorios del domingo (solo a quien no ha respondido).
+  //    Si alguno se saltó, se envía solo el más reciente.
   const RECORDATORIOS = [
-    { campo: 'recordatorio_dom14', dia: 'Sun', hora: 14, title: 'Encuesta semanal 📅', body: '¿Ya has marcado qué días puedes esta semana?' },
-    { campo: 'recordatorio_dom',   dia: 'Sun', hora: 23, title: 'Recordatorio', body: 'Aún no has rellenado la encuesta de la semana' },
-    { campo: 'recordatorio_lun',   dia: 'Mon', hora: 14, title: 'Último aviso 🍽️', body: 'La encuesta se cierra hoy a las 17:00' },
+    { campo: 'recordatorio_dom14', hora: 14, title: 'Encuesta semanal 📅', body: '¿Ya has marcado qué días puedes esta semana?' },
+    { campo: 'recordatorio_dom',   hora: 23, title: 'Último aviso 🔥', body: 'Contesta la encuesta antes de medianoche para no perder tu racha' },
   ] as const;
-  const momento = (d: string, h: number) => (d === 'Mon' ? 24 : 0) + h;
-  const vencidos = RECORDATORIOS.filter((r) => momento(dia, hora) >= momento(r.dia, r.hora));
+  const vencidos = RECORDATORIOS.filter((r) => hora >= r.hora);
   const toca = [...vencidos].reverse().find((r) => !enc[r.campo]);
 
   if (toca) {

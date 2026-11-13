@@ -1,11 +1,13 @@
 // src/pages/Encuesta.tsx — ruta /encuesta
 // Encuesta semanal por franjas (mañana / tarde / noche).
 // Los resultados se ven en todo momento, también mientras está abierta.
+// v2: cada día se cierra cuando pasa; la encuesta sigue abierta para los días que quedan.
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { usePerfiles } from '../lib/perfiles';
 import { Avatar, FilaAvatares } from '../components/Avatar';
+import { hoyISO } from '../lib/rachas';
 
 const FRANJAS = ['mañana', 'tarde', 'noche'] as const;
 type Franja = (typeof FRANJAS)[number];
@@ -35,6 +37,8 @@ export default function EncuestaPage() {
   const [cambios, setCambios] = useState(false);
   const [guardando, setGuardando] = useState(false);
   const [mensaje, setMensaje] = useState<string | null>(null);
+  const hoy = hoyISO();
+  const diaDe = (k: string) => k.split('|')[0];
 
   const cargar = useCallback(async (encId?: string) => {
     const { data: { user } } = await supabase.auth.getUser();
@@ -85,22 +89,24 @@ export default function EncuestaPage() {
   }, [disp, borrador, miId]);
 
   const mejores = useMemo(() => {
-    const lista = [...porCelda.entries()].sort((a, b) => b[1].length - a[1].length);
+    const lista = [...porCelda.entries()].filter(([k]) => diaDe(k) >= hoy).sort((a, b) => b[1].length - a[1].length);
     const max = lista[0]?.[1].length ?? 0;
     return max > 0 ? lista.filter(([, ids]) => ids.length === max).slice(0, 3) : [];
-  }, [porCelda]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [porCelda, hoy]);
 
   if (enc === undefined) return null;
   if (enc === null) return <main style={{ padding: 16 }}><h1>Encuesta semanal</h1><p>La próxima encuesta se abre el domingo a las 10:00.</p></main>;
 
-  const abierta = enc.estado === 'abierta';
   const dias = diasDeLaSemana(enc.semana_inicio);
+  const abierta = enc.estado === 'abierta' && dias.some((d) => d >= hoy); // queda algún día por delante
+  const antesDeEmpezar = hoy < enc.semana_inicio;                           // aún es domingo: cuenta para la racha
   const total = perfiles.length || 7;
   const yaRespondi = !!miId && respondieron.includes(miId);
   const faltan = perfiles.filter((p) => !respondieron.includes(p.id));
 
   function alternar(k: string) {
-    if (!abierta) return;
+    if (!abierta || diaDe(k) < hoy) return; // los días que ya han pasado están cerrados
     setBorrador((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
     setCambios(true);
     setMensaje(null);
@@ -110,16 +116,19 @@ export default function EncuestaPage() {
     if (!miId || !enc) return;
     setGuardando(true);
     const elegidas = ningunDia ? new Set<string>() : borrador;
-    const { error: e1 } = await supabase.from('disponibilidad').delete().eq('encuesta_id', enc.id).eq('usuaria_id', miId);
-    const filas = [...elegidas].map((k) => { const [dia, franja] = k.split('|'); return { encuesta_id: enc.id, usuaria_id: miId, dia, franja }; });
+    // Solo se tocan los días que no han pasado; los anteriores quedan como estaban
+    const { error: e1 } = await supabase.from('disponibilidad').delete()
+      .eq('encuesta_id', enc.id).eq('usuaria_id', miId).gte('dia', hoy);
+    const filas = [...elegidas].filter((k) => diaDe(k) >= hoy)
+      .map((k) => { const [dia, franja] = k.split('|'); return { encuesta_id: enc.id, usuaria_id: miId, dia, franja }; });
     const { error: e2 } = filas.length ? await supabase.from('disponibilidad').insert(filas) : { error: null };
     const { error: e3 } = await supabase.from('respuestas_encuesta')
       .upsert({ encuesta_id: enc.id, usuaria_id: miId, respondida_en: new Date().toISOString() }, { onConflict: 'encuesta_id,usuaria_id' });
     setGuardando(false);
     if (e1 || e2 || e3) { setMensaje('No se ha podido guardar. Inténtalo otra vez.'); return; }
-    if (ningunDia) setBorrador(new Set());
+    if (ningunDia) setBorrador((b) => new Set([...b].filter((k) => diaDe(k) < hoy)));
     setCambios(false);
-    setMensaje(ningunDia ? 'Guardado: esta semana no puedes ningún día.' : 'Guardado ✓');
+    setMensaje(ningunDia ? 'Guardado: los días que quedan no puedes.' : 'Guardado ✓');
     cargar(enc.id);
   }
 
@@ -129,7 +138,9 @@ export default function EncuestaPage() {
         <h1 style={{ margin: 0, fontSize: 28 }}>Encuesta semanal</h1>
         <p style={{ margin: '4px 0 0', color: '#6b6b6b' }}>
           Semana del {etiquetaDia(dias[0])} al {etiquetaDia(dias[6])} ·{' '}
-          {abierta ? 'se cierra el lunes a las 17:00' : 'cerrada'}
+          {!abierta ? 'cerrada' : antesDeEmpezar
+            ? 'contesta antes de medianoche para tu racha 🔥'
+            : 'cada día se cierra cuando pasa'}
         </p>
       </header>
 
@@ -147,21 +158,25 @@ export default function EncuestaPage() {
           <tbody>
             {dias.map((dia) => (
               <tr key={dia}>
-                <td style={{ fontSize: 14, whiteSpace: 'nowrap', textTransform: 'capitalize' }}>{etiquetaDia(dia)}</td>
+                <td style={{ fontSize: 14, whiteSpace: 'nowrap', textTransform: 'capitalize', color: dia < hoy ? '#9a96a0' : 'inherit' }}>
+                  {etiquetaDia(dia)}{dia < hoy && <div style={{ fontSize: 11, textTransform: 'none' }}>cerrado</div>}
+                </td>
                 {FRANJAS.map((fr) => {
                   const k = clave(dia, fr);
                   const ids = porCelda.get(k) ?? [];
                   const mia = borrador.has(k);
                   const intensidad = ids.length / total;
+                  const cerrado = !abierta || dia < hoy;
                   return (
                     <td key={fr}>
                       <button
                         onClick={() => alternar(k)}
-                        disabled={!abierta}
+                        disabled={cerrado}
                         aria-pressed={mia}
                         title={ids.map((id) => porId(id)?.nombre).filter(Boolean).join(', ') || 'Nadie todavía'}
                         style={{
-                          width: '100%', minWidth: 64, height: 48, borderRadius: 10, font: 'inherit', cursor: abierta ? 'pointer' : 'default',
+                          width: '100%', minWidth: 64, height: 48, borderRadius: 10, font: 'inherit', cursor: cerrado ? 'default' : 'pointer',
+                          opacity: dia < hoy ? 0.45 : 1,
                           border: mia ? '2px solid #7b2f63' : '1px solid #ddd',
                           background: `rgba(123, 47, 99, ${0.08 + intensidad * 0.6})`,
                           color: intensidad > 0.55 ? '#fff' : 'inherit', fontWeight: 600,

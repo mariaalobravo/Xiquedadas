@@ -20,6 +20,7 @@ export default function Layout() {
         <Link to="/" style={{ flex: 1, fontWeight: 800, fontSize: 20, color: C.morado, textDecoration: 'none' }}>
           Xiquedadas
         </Link>
+        <Link to="/album" aria-label="Álbum de fotos" style={{ fontSize: 22, padding: 6, textDecoration: 'none' }}>📸</Link>
         <Link to="/normas" aria-label="Normas" style={{ fontSize: 22, padding: 6, textDecoration: 'none' }}>📜</Link>
         <Link to="/ajustes" aria-label="Ajustes" style={{ fontSize: 22, padding: 6, textDecoration: 'none' }}>⚙️</Link>
       </header>

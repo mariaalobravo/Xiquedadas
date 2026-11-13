@@ -15,6 +15,9 @@ import MisXiques from './pages/MisXiques';
 import Grupo from './pages/Grupo';
 import Normas from './pages/Normas';
 import Ajustes from './pages/Ajustes';
+import Ocupaciones from './pages/Ocupaciones';
+import Album from './pages/Album';
+import Quedada from './pages/Quedada';
 
 const router = createBrowserRouter([
   {
@@ -29,6 +32,9 @@ const router = createBrowserRouter([
       { path: '/plan/:id', element: <DetallePlan /> },
       { path: '/normas', element: <Normas /> },
       { path: '/ajustes', element: <Ajustes /> },
+      { path: '/ocupaciones', element: <Ocupaciones /> },   // v2
+      { path: '/album', element: <Album /> },               // v2
+      { path: '/quedada/:id', element: <Quedada /> },       // v2
       { path: '*', element: <Planes /> },
     ],
   },

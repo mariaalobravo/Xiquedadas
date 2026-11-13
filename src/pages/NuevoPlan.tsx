@@ -5,7 +5,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { usePerfiles } from '../lib/perfiles';
 import { FilaAvatares } from '../components/Avatar';
-import { HORA_FRANJA, aInputLocal, franjaDeHora, type Franja } from '../lib/planes';
+import { HORA_FRANJA, aInputLocal, franjaDeHora, ocupacionesEn, textoOcupada, type Franja, type Ocupada } from '../lib/planes';
 import { C, btnPrimario, campo, etiqueta, pagina } from '../lib/ui';
 
 function manana() {
@@ -43,6 +43,7 @@ export default function NuevoPlan() {
   const [limite, setLimite] = useState('');
   const [limiteTocado, setLimiteTocado] = useState(false);
   const [pueden, setPueden] = useState<string[] | null>(null);
+  const [ocupadas, setOcupadas] = useState<Ocupada[]>([]);
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -55,6 +56,19 @@ export default function NuevoPlan() {
 
   // Fecha límite automática mientras no la cambies a mano
   useEffect(() => { if (!limiteTocado && !isNaN(inicio.getTime())) setLimite(limitePorDefecto(inicio)); }, [inicio, limiteTocado]);
+
+  // v2: quién tiene algo apuntado (viaje, clase…) a esa hora
+  useEffect(() => {
+    if (isNaN(inicio.getTime())) return;
+    let cancelado = false;
+    let fin = new Date(inicio.getTime() + 2 * 3_600_000);
+    if (horaFin) {
+      fin = new Date(`${fecha}T${horaFin}`);
+      if (fin <= inicio) fin.setDate(fin.getDate() + 1);
+    }
+    ocupacionesEn(inicio, fin).then((o) => { if (!cancelado) setOcupadas(o); });
+    return () => { cancelado = true; };
+  }, [inicio, fecha, horaFin]);
 
   // Quién puede según la encuesta de esa semana
   useEffect(() => {
@@ -73,8 +87,19 @@ export default function NuevoPlan() {
   async function guardar(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    try {
+      await crear();
+    } catch (err: any) {
+      setGuardando(false);
+      setError(`Algo ha fallado: ${err?.message ?? err}`);
+    }
+  }
+
+  async function crear() {
     const lim = new Date(limite);
     if (!titulo.trim()) return setError('Ponle un título al plan.');
+    if (!fecha || !hora || isNaN(inicio.getTime())) return setError('Pon el día y la hora a la que empieza el plan.');
+    if (!limite || isNaN(lim.getTime())) return setError('Pon la fecha límite para responder.');
     if (inicio <= new Date()) return setError('La fecha del plan tiene que ser futura.');
     if (!(lim > new Date())) return setError('La fecha límite para responder tiene que ser futura.');
     if (lim > inicio) return setError('La fecha límite tiene que ser antes del plan.');
@@ -95,7 +120,7 @@ export default function NuevoPlan() {
       fecha_limite: lim.toISOString(),
     }).select('id').single();
     setGuardando(false);
-    if (error || !data) return setError('No se ha podido crear el plan. Inténtalo otra vez.');
+    if (error || !data) return setError(`No se ha podido crear el plan${error ? ` (${error.message})` : ''}.`);
     navigate(`/plan/${data.id}`, { replace: true });
   }
 
@@ -123,6 +148,15 @@ export default function NuevoPlan() {
           <div style={{ fontSize: 14, background: C.moradoSuave, padding: 10, borderRadius: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
             <span>Según la encuesta, esa {franjaDeHora(hora)}:</span>
             <FilaAvatares ids={pueden} tam={26} />
+          </div>
+        )}
+
+        {ocupadas.length > 0 && (
+          <div style={{ fontSize: 14, background: C.avisoSuave, color: C.aviso, padding: 10, borderRadius: 10, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <span style={{ fontWeight: 600 }}>Ojo, a esa hora:</span>
+            {ocupadas
+              .filter((o, i, arr) => arr.findIndex((x) => x.usuaria_id === o.usuaria_id) === i)
+              .map((o) => <span key={o.usuaria_id}>🧳 {porId(o.usuaria_id)?.nombre ?? 'Alguien'}: {textoOcupada(o)}</span>)}
           </div>
         )}
 
